@@ -149,6 +149,8 @@ class SimpleSelfAttention(nn.Module):
             elif name == "relu_norm":
                 attn = F.relu(scores)
                 attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
+            elif name == "exp":
+                attn = torch.exp(scores)
             elif name == "sigmoid":
                 attn = torch.sigmoid(scores)
                 attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
@@ -178,8 +180,9 @@ class SimpleSelfAttention(nn.Module):
         K = self.k(x)
         V = self.v(x)
 
-        scores = (Q @ K.transpose(-2, -1)) / math.sqrt(self.d_model)  # (B,L,L)
-
+        # scores = (Q @ K.transpose(-2, -1)) / math.sqrt(self.d_model)  # (B,L,L)
+        scores = Q @ K.transpose(-2, -1)
+        
         # masking before nonlinearity is standard
         if mask is not None:
             if mask.dim() == 2:  # (B,L)
@@ -203,7 +206,7 @@ class InContextTorusRegressor(nn.Module):
         super().__init__()
         self.in_proj = nn.Linear(d_token, d_model)
         self.attn = SimpleSelfAttention(d_model, attn_nonlinearity=attn_nonlinearity)
-        self.ln1 = nn.LayerNorm(d_model)
+        # self.ln1 = nn.LayerNorm(d_model)
 
         # FFN (you can swap in GLU here if you want)
         self.ff = nn.Sequential(
@@ -211,7 +214,7 @@ class InContextTorusRegressor(nn.Module):
             nn.GLU(dim=-1),
             nn.Linear(d_ff, d_model),
         )
-        self.ln2 = nn.LayerNorm(d_model)
+        # self.ln2 = nn.LayerNorm(d_model)
 
         self.out = nn.Linear(d_model, 1)
 
@@ -221,8 +224,11 @@ class InContextTorusRegressor(nn.Module):
         returns: yhat_all: (B, L)
         """
         h = self.in_proj(tokens)                    # (B,L,d)
-        h = self.ln1(h + self.attn(h, attn_mask))   # residual
-        h = self.ln2(h + self.ff(h))                # residual
+        # h = self.ln1(h + self.attn(h, attn_mask))   # residual
+        # h = self.ln2(h + self.ff(h))                # residual
+        # Remove the LayerNorms for simplicity
+        h = h + self.attn(h, attn_mask)   # residual
+        h = h + self.ff(h)                # residual
         yhat = self.out(h).squeeze(-1)              # (B,L)
         return yhat
 
@@ -279,14 +285,11 @@ def train_in_context(
 # Run
 if __name__ == "__main__":
     
-    # Ks = [8, 16, 32, 64]
-    # d_models = [64, 128, 256]
-    # attn_nonlinearities = ["softmax", "relu", "relu_norm", "sigmoid", "tanh", "identity"]    
-    
-    Ks = [8]
-    d_models = [64]
-    attn_nonlinearities = ["relu"]    
-    
+    Ks = [2,4,6,8,10,12,14,16,18,20]
+    d_models = [8,16,32,64]
+    attn_nonlinearities = ["relu", "softmax", "identity", "exp"]    
+    # attn_nonlinearities = ["exp"]    
+
     for K in Ks:
         for d_model in d_models:
             for attn_nonlinearity in attn_nonlinearities:
@@ -294,7 +297,7 @@ if __name__ == "__main__":
                 print(f"Running K={K}, d_model={d_model}, d_ff={d_ff}")
                 config = RunConfig(
                     steps=10000,
-                    batch_size=16,
+                    batch_size=1,
                     K=K,
                     d_model=d_model,
                     d_ff=d_ff,
@@ -304,16 +307,3 @@ if __name__ == "__main__":
                 run_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         
                 model = train_in_context(config, log_dir="logs/torus_ic", run_name=run_name)
-    # config = RunConfig(
-    #     steps=2000,
-    #     batch_size=64,
-    #     K=32,
-    #     d_model=128,
-    #     d_ff=256,
-    #     lr=1e-3,
-    #     attn_nonlinearity="softmax",
-    # )
-    # run_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-
-    # model = train_in_context(config, log_dir="logs/torus_ic", run_name=run_name)
-
