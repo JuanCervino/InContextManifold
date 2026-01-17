@@ -138,23 +138,7 @@ def predict_heat_torus(X_train, alpha, X_test, t, wrap=True):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 p = torch.tensor([1.0, 2.0], device=device)
-# t = 1
 
-# for Ks in np.linspace(1, K_context, 8):
-#     K_tilde = int(Ks)  # downsampled K
-#     # t_tilde = t * (1 + K_tilde / K_context)**2  # scale time accordingly
-#     t_tilde = t
-#     # print(t, t_tilde, K_context, K_tilde)
-#     X = tokens.cpu().numpy()[0,0:K_tilde,0:2]  # (K,2)
-#     y = tokens.cpu().numpy()[0,0:K_tilde,2]  # (K,2)
-
-#     X_test = tokens.cpu().numpy()[0,-2:-1,0:2]
-#     # X_test = tokens.cpu().numpy()[0,0:1,0:2]
-
-#     K, alpha = fit_kernel_machine_heat_torus(X, y, t=t_tilde, lam=1e-4)
-#     y_pred = predict_heat_torus(X, alpha, X_test, t=t_tilde)
-#     print(f"y_pred:{y_pred.item()}, y:{y_q.cpu().numpy()}, t_tilde:{t_tilde}, K_tilde:{K_tilde}   error {np.abs(y_pred - y_q.cpu().numpy())}")
-  
 batch_size = 1
 num_episodes = 20
 means = np.array([])
@@ -173,8 +157,8 @@ for K_context in [2,4,6,8,10,12,14,16]:
                 X = tokens.cpu().numpy()[0,0:K_context,0:2]  # (K,2)
                 y = tokens.cpu().numpy()[0,0:K_context,2]  # (K,2)
 
-                X_test = tokens.cpu().numpy()[0,-2:-1,0:2]
-                # X_test = tokens.cpu().numpy()[0,0:1,0:2]
+                # X_test = tokens.cpu().numpy()[0,-2:-1,0:2]
+                X_test = tokens.cpu().numpy()[0,-1:,0:2]
                 try :
                     K, alpha = fit_kernel_machine_heat_torus(X, y, t=t_tilde, lam=lam_tilde)
                     y_pred = predict_heat_torus(X, alpha, X_test, t=t_tilde)
