@@ -10,7 +10,7 @@ from typing import Optional
 from datetime import datetime
 
 TWOPI = 2.0 * math.pi
-
+T =0.01
 # -------------------------
 # Config
 # -------------------------
@@ -119,7 +119,7 @@ class BilinearTokenization(nn.Module):
     def forward(self, tokens):
         """
         tokens: (B, L, 4) = [x1, x2, y, is_query]
-        returns: (B, L, d_model) with structure [1, x1, x2, ||x||^2, 0..., y]
+        returns: (B, L, d_model) with structure [1, cos(x1), sin(x1), cos(x2), sin(x2), ||x||^2, 0..., y]
         """
         B, L, _ = tokens.shape
         device = tokens.device
@@ -129,15 +129,15 @@ class BilinearTokenization(nn.Module):
         y = tokens[..., 2:3]
         is_query = tokens[..., 3:4]
         
-        x_norm_sq = x1**2 + x2**2
+        x_norm_sq  = torch.cos(x1) ** 2 + torch.sin(x1) ** 2 + torch.cos(x2) ** 2 + torch.sin(x2) ** 2
         ones = torch.ones(B, L, 1, device=device)
         y_masked = y * (1 - is_query)
         
-        components = [ones, x1, x2, x_norm_sq]
+        components = [ones, torch.cos(x1), torch.sin(x1), torch.cos(x2), torch.sin(x2), x_norm_sq]
         
-        if self.n_padding > 0:
-            zeros = torch.zeros(B, L, self.n_padding, device=device)
-            components.append(zeros)
+        # if self.n_padding > 0:
+        #     zeros = torch.zeros(B, L, self.n_padding, device=device)
+        #     components.append(zeros)
         
         components.append(y_masked)
         embedded = torch.cat(components, dim=-1)
@@ -157,7 +157,7 @@ class FixedAttention(nn.Module):
         
         self.register_buffer('B', self._construct_B())
         self.register_buffer('C', self._construct_C())
-        
+
         # V is trainable, initialized as identity
         # self.V = nn.Parameter(torch.eye(d_model))
         V = torch.zeros(d_model, d_model)
@@ -168,15 +168,15 @@ class FixedAttention(nn.Module):
     def _construct_B(self):
         d = self.d_model
         B = torch.zeros(d, d)
-        B[0:2, 2:4] = -1.0 / (4.0) *torch.eye(2) ## This is only for the torus
-        B[3, 5] = -1.0 / (4.0) ## So is this
+        B[0:4, 1:5] = -1.0 / (4.0*T) *torch.eye(4) # This is only for the torus
+        B[4, 5] = -1.0 / (4.0*T) # So is this
         return B
     
     def _construct_C(self):
         d = self.d_model
         C = torch.zeros(d, d)
-        C[0:2, 2:4] = -2.0 * torch.eye(2) ## This is only for the torus case
-        C[3, 0] = 1.0 ## So is this
+        C[0:4, 1:5] = -2.0 * torch.eye(4) ## This is only for the torus case
+        C[4, 0] = 1.0 ## So is this
         return C
     
     def _apply_attn_nonlinearity(self, scores):
@@ -185,10 +185,10 @@ class FixedAttention(nn.Module):
             attn = F.softmax(scores, dim=-1)
         elif name == "exp":
             attn = torch.exp(scores)
-            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
+            attn = attn / (attn.sum(dim=-2, keepdim=True) + 1e-8)
         elif name == "relu":
             attn = F.relu(scores)
-            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
+            attn = attn / (attn.sum(dim=-2, keepdim=True) + 1e-8)
         elif name == "identity":
             attn = scores
         else:
@@ -275,7 +275,7 @@ def train_architecture(
     p = torch.tensor([1.0, 2.0], device=device)
 
     model = FixedTorusRegressor(
-        d_token=4, 
+        d_token=6, 
         d_model=config.d_model, 
         n_layers=config.n_layers,
         attn_nonlinearity=config.attn_nonlinearity
@@ -338,19 +338,19 @@ if __name__ == "__main__":
     print("Based on Lemma A.6 construction")
     print("=" * 60)
     
-    for thisK in range(2, 64, 8):
+    for thisK in [10, 25, 50, 100, 250]:
         config = RunConfig(
             steps=10000,
             batch_size=64,
             K=thisK,
-            d_model=8,
+            d_model=7,
             d_ff=0,
             n_layers=15,  # NEW: Use 3 layers
             lr=1e-3,
             attn_nonlinearity="softmax",
         )
         
-        run_name = f"K{thisK}_L{config.n_layers}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"K_{thisK}_L_{config.n_layers}_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_T_{T}"
         model = train_architecture(config, log_dir="logs/torus_trainable_v", run_name=run_name)
         
         print(f"\nTraining complete for K={thisK} with {config.n_layers} layers!")
