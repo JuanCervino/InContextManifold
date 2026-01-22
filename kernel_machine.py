@@ -54,9 +54,6 @@ def heat_kernel_torus_2d(t, x_vec, y_vec, wrap=True):
     return heat_kernel_S1(t, x_vec[0], y_vec[0], wrap=wrap) * \
            heat_kernel_S1(t, x_vec[1], y_vec[1], wrap=wrap)
 
-
-
-
 def gram_matrix_heat_torus_2d(X, t, wrap=True):
     """
     Build Gram matrix K where K[i,j] = heat_kernel_torus_2d(t, X[i], X[j]).
@@ -136,52 +133,228 @@ def predict_heat_torus(X_train, alpha, X_test, t, wrap=True):
     return yhat
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = "cpu"
+p = torch.tensor([np.pi, np.pi], device=device)
 
-p = torch.tensor([1.0, 2.0], device=device)
+def periodic_func(x,p):
+    return np.cos(x[..., 0]) *(np.sin(x[..., 1])**2)
 
+
+from scipy.spatial.distance import cdist
+def SoftMaxKernel(X, t=1/2):
+    real_X = np.column_stack([np.cos(X[...,0]), np.sin(X[...,0]), np.cos(X[...,1]), np.sin(X[...,1])])
+    dist_mat =  cdist(real_X,real_X)**2
+    exp_x = np.exp(-dist_mat/(4*t))
+    return exp_x/np.sum(exp_x, axis=1)[:, np.newaxis]
+
+def fit_kernel_machine_softmax(X, y, t, lam, wrap=True):
+    """
+    Convenience: compute Gram matrix + alpha.
+    """
+    K = SoftMaxKernel(X, t=t)
+    alpha = solve_alphas(K, y, lam=lam)
+    return K, alpha
+
+def exp_dist_kernel(X, t=1/2):
+    real_X = np.column_stack([np.cos(X[...,0]), np.sin(X[...,0]), np.cos(X[...,1]), np.sin(X[...,1])])
+    dist_mat =  cdist(real_X,real_X)**2
+    exp_x = np.exp(-dist_mat/(4*t))
+    return exp_x
+
+def fit_kernel_machine_exp(X, y, t, lam, wrap=True):
+    """
+    Convenience: compute Gram matrix + alpha.
+    """
+    K = exp_dist_kernel(X, t=t)
+    alpha = solve_alphas(K, y, lam=lam)
+    return K, alpha
+
+def softmax_corr(X, t=1/2):
+    real_X = np.column_stack([np.cos(X[...,0]), np.sin(X[...,0]), np.cos(X[...,1]), np.sin(X[...,1])])
+
+    exp_x = np.exp(real_X @real_X.T/(t))
+    return exp_x/np.sum(exp_x, axis=1)[:, np.newaxis]
+
+def fit_kernel_machine_corr(X, y, t, lam, wrap=True):
+    """
+    Convenience: compute Gram matrix + alpha.
+    """
+    K = softmax_corr(X, t=t)
+    alpha = solve_alphas(K, y, lam=lam)
+    return K, alpha
+
+import json
+
+class BestConfigTracker:
+    def __init__(self, save_path="best_configs.json"):
+        self.best = {}
+        self.save_path = save_path
+
+    def update(self, model_name, score, t, lam, n):
+        if (
+            model_name not in self.best
+            or score < self.best[model_name]["score"]  # Changed to < since lower error is better
+        ):
+            self.best[model_name] = {
+                "t": t,
+                "lam": lam,
+                "score" : score,
+                "context_length": n
+            }
+    
+    def get_best(self, model_name):
+        """Get best parameters for a model"""
+        return self.best.get(model_name, {})
+
+#### Save to CSV
+from datetime import datetime
+run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+csv_path = (
+    Path(__file__).parent
+    / "kernels"
+    / f"errors_by_model_{run_time}.csv"
+)
+
+# csv_path = Path("errors_by_model.csv")
+write_header = not csv_path.exists()
+print(f"Writing results to {csv_path} (write_header={write_header})")
+rows = []
+
+####
 batch_size = 1
 num_episodes = 20
-means = np.array([])
-stds = np.array([])
+context_lengths = 2 *np.arange(1,50,2)  # [2,4,6,...,98]
+ts = [0.001, 0.01, 0.05, 0.1, 0.15, 0.2, 0.25]
+lams = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1]  # Fixed: 1e5 -> 1e-5
+trackers = []
+models = {'softmax': fit_kernel_machine_softmax, 'heat': fit_kernel_machine_heat_torus, 'exp': fit_kernel_machine_exp}
+min_for_model = {model: 0 for model in models.keys()}
+means_for_models = {model: np.array([]) for model in models.keys()}
+stds_for_models = {model: np.array([]) for model in models.keys()}
 
-for K_context in [2,4,6,8,10,12,14,16]:    
-    this_vals = np.zeros(num_episodes)
-    for rep in range(num_episodes):  # multiple samples to average over
-        min = 100
+# Store best parameters for each episode
+best_params_per_episode = {model: [] for model in models.keys()}
 
-        tokens, y_q = sample_episode(batch_size, K_context, p, device)
-        # Test various (t_tilde, lam_tilde) combinations
-        for t_tilde in [0.01, 0.05, 0.1, 0.5, 1, 2, 3, 4,  5, 10, 20, 50]:
-            for lam_tilde in [1e-8, 1e-7, 1e-6, 1e5, 1e-4, 1e-3, 1e-2, 0.1]:
-
-                X = tokens.cpu().numpy()[0,0:K_context,0:2]  # (K,2)
-                y = tokens.cpu().numpy()[0,0:K_context,2]  # (K,2)
-
-                # X_test = tokens.cpu().numpy()[0,-2:-1,0:2]
-                X_test = tokens.cpu().numpy()[0,-1:,0:2]
-                try :
-                    K, alpha = fit_kernel_machine_heat_torus(X, y, t=t_tilde, lam=lam_tilde)
-                    y_pred = predict_heat_torus(X, alpha, X_test, t=t_tilde)
-                    if np.abs(y_pred - y_q.cpu().numpy()) < min:
-                        min = np.abs(y_pred - y_q.cpu().numpy())
-                    # print(f"y_pred:{y_pred.item()}, y:{y_q.cpu().numpy()}, t_tilde:{t_tilde}, lam_tilde:{lam_tilde}   error {np.abs(y_pred - y_q.cpu().numpy())}")
-
-                except np.linalg.LinAlgError:
-                    pass
-                    # print(f"LinAlgError for t_tilde:{t_tilde}, lam_tilde:{lam_tilde}")      
-        # Keep track of minimum error across hyperparameters  
-        # print(f"Minimum error achieved: {min}")
-        this_vals[rep] = min
-    mean_error = np.mean(this_vals)
-    std_error = np.std(this_vals)
-    means = np.append(means, mean_error)
-    stds = np.append(stds, std_error)
-    print(f"K_context:{K_context}   Mean error over {num_episodes} episodes: {mean_error} ± {std_error}")
+for K_context in context_lengths:    
+    tracker = BestConfigTracker()
+    this_vals_for_model = {model: np.zeros(num_episodes) for model in models.keys()}
+    # Track best params for each model at this K_context
+    episode_params = {model: [] for model in models.keys()}
     
-plt.errorbar(np.arange(2,18,2), means, yerr=stds, fmt='-o')
+    for rep in range(num_episodes):  # multiple samples to average over
+        min_for_model = {model: 100 for model in models.keys()}
+        best_t_for_model = {model: None for model in models.keys()}
+        best_lam_for_model = {model: None for model in models.keys()}
+
+        tokens, y_q = sample_episode(batch_size, K_context, p, device) #, func=periodic_func)
+        # Test various (t_tilde, lam_tilde) combinations
+        for t_tilde in ts:
+            for lam_tilde in lams:
+                for model in models.keys():
+                    func = models[model]
+                    min_error = min_for_model[model]
+                    X = tokens.cpu().numpy()[0,0:K_context,0:2]  # (K,2)
+                    y = tokens.cpu().numpy()[0,0:K_context,2]  # (K,2)
+
+                    X_test = tokens.cpu().numpy()[0,-1:,0:2]
+                
+                    try:
+                        K, alpha = func(X, y, t=t_tilde, lam=K_context*lam_tilde)
+                        y_pred = predict_heat_torus(X, alpha, X_test, t=t_tilde)
+                        error = np.abs(y_pred - y_q.cpu().numpy())[0]
+                        
+                        if error < min_error:
+                            min_for_model[model] = error
+                            best_t_for_model[model] = t_tilde
+                            best_lam_for_model[model] = lam_tilde
+                            tracker.update(model, error, t_tilde, lam_tilde, K_context)
+
+                    except np.linalg.LinAlgError:
+                        pass
+                        
+        # Store the minimum error and best parameters for this episode
+        for model in models.keys():
+            this_vals_for_model[model][rep] = min_for_model[model]
+            episode_params[model].append({
+                'episode': rep,
+                'K_context': K_context,
+                'error': min_for_model[model],
+                't': best_t_for_model[model],
+                'lam': best_lam_for_model[model]
+            })
+    
+    # Store episode params for this K_context
+    for model in models.keys():
+        best_params_per_episode[model].extend(episode_params[model])
+    
+    # Calculate statistics and get best parameters
+    for model in models.keys():
+        mean_error = np.mean(this_vals_for_model[model])
+        std_error = np.std(this_vals_for_model[model])
+        means_for_models[model] = np.append(means_for_models[model], mean_error)
+        stds_for_models[model] = np.append(stds_for_models[model], std_error)
+        
+        # Get best parameters for this model at this K_context
+        best_config = tracker.get_best(model)
+        
+        rows.append({
+            "model": model,
+            "K_context": K_context,
+            "mean_error": mean_error,
+            "std_error": std_error,
+            "best_t": best_config.get("t", None),
+            "best_lam": best_config.get("lam", None),
+            "best_score": best_config.get("score", None)
+        })
+        print(f"{model=} K_context:{K_context}   Mean error over {num_episodes} episodes: {mean_error} ± {std_error}   Best: t={best_config.get('t')}, lam={best_config.get('lam')}")
+    
+    trackers.append(tracker)
+
+# Write main results to CSV
+if rows:
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+# Write detailed per-episode parameters to a separate CSV
+episode_csv_path = (
+    Path(__file__).parent
+    / "kernels"
+    / f"episode_params_{run_time}.csv"
+)
+
+episode_rows = []
+for model in models.keys():
+    for params in best_params_per_episode[model]:
+        episode_rows.append({
+            "model": model,
+            "K_context": params['K_context'],
+            "episode": params['episode'],
+            "error": params['error'],
+            "best_t": params['t'],
+            "best_lam": params['lam']
+        })
+
+if episode_rows:
+    with episode_csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(episode_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(episode_rows)
+    print(f"Per-episode parameters saved to {episode_csv_path}")
+
+for model in models.keys():
+    means = means_for_models[model]
+    stds = stds_for_models[model]
+    print(f'{model=} {list(zip(context_lengths,means))=}')
+    plt.errorbar(context_lengths, means, yerr=stds, fmt='-o', label=model.capitalize())
+
 plt.xlabel('K_context')
 plt.ylabel('Mean Absolute Error ± StdDev')
-plt.title('Kernel Machine on Heat Kernel over 2D Torus')
-plt.xticks(np.arange(2,18,2))
+plt.yscale('log')
+plt.title('Different Kernel Machine on Heat Kernel over 2D Torus')
+plt.xticks(context_lengths)
 plt.grid(True)
-plt.show()  
+plt.legend()
+plt.savefig("kernel_machine_heat_torus_kernels.png")
