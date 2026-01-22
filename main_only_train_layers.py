@@ -163,20 +163,20 @@ class FixedAttention(nn.Module):
         V = torch.zeros(d_model, d_model)
         V[-1, -1] = torch.randn(1).item() * 0.01  # Small random initialization
         self.V = nn.Parameter(V)
-        self.attn_nonlinearity = attn_nonlinearity
+        self.attn_nonlinearity = attn_nonlinearity 
         
     def _construct_B(self):
         d = self.d_model
         B = torch.zeros(d, d)
-        B[0, 1] = -1.0 / (4.0 * d)
-        B[1, 2] = -1.0 / (4.0 * d)
+        B[0:2, 2:4] = -1.0 / (4.0) *torch.eye(2) ## This is only for the torus
+        B[3, 5] = -1.0 / (4.0) ## So is this
         return B
     
     def _construct_C(self):
         d = self.d_model
         C = torch.zeros(d, d)
-        C[0, 1] = -2.0
-        C[1, 0] = 1.0
+        C[0:2, 2:4] = -2.0 * torch.eye(2) ## This is only for the torus case
+        C[3, 0] = 1.0 ## So is this
         return C
     
     def _apply_attn_nonlinearity(self, scores):
@@ -215,9 +215,9 @@ class FixedAttention(nn.Module):
 
         attn = self._apply_attn_nonlinearity(scores)
         VZ = x @ self.V.T
-        out = torch.bmm(attn, VZ)
+        out = torch.bmm(attn, VZ) 
         
-        return x + out
+        return x + out ## This seems like the residual stream
 
 
 class FixedTorusRegressor(nn.Module):
