@@ -8,9 +8,10 @@ import json
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+import numpy as np
 
 TWOPI = 2.0 * math.pi
-T =0.01
+
 # -------------------------
 # Config
 # -------------------------
@@ -24,6 +25,7 @@ class RunConfig:
     n_layers: int = 2  # NEW: Number of attention layers
     lr: float = 0.001  # Now with training
     attn_nonlinearity: str = "softmax"
+    T: float = 0.01
 
     @staticmethod
     def from_json(path: str | Path) -> "RunConfig":
@@ -34,8 +36,6 @@ class RunConfig:
     def to_json(self, path: str | Path):
         with open(path, "w") as f:
             json.dump(asdict(self), f, indent=2, sort_keys=True)
-
-
 class SimpleCSVLogger:
     def __init__(self, log_dir: str | Path, config: RunConfig, run_name: str = "run", extra_params: Optional[dict] = None):
         self.log_dir = Path(log_dir)
@@ -47,6 +47,9 @@ class SimpleCSVLogger:
         params = asdict(config)
         if extra_params:
             params.update(extra_params)
+        
+        # Convert ALL params to JSON-serializable types (not just extra_params)
+        params = self._make_serializable(params)
 
         with open(self.json_path, "w") as f:
             json.dump(params, f, indent=2, sort_keys=True)
@@ -55,6 +58,23 @@ class SimpleCSVLogger:
         self._writer = csv.DictWriter(self._csv_file, fieldnames=["step", "loss", "mae"])
         self._writer.writeheader()
         self._csv_file.flush()
+
+    def _make_serializable(self, obj):
+        """Convert numpy/torch types to native Python types for JSON serialization"""
+        if isinstance(obj, dict):
+            return {key: self._make_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_serializable(item) for item in obj]
+        elif isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif hasattr(obj, 'item'):  # Handle PyTorch scalars
+            return obj.item()
+        else:
+            return obj
 
     def log(self, step: int, loss: float, mae: float):
         self._writer.writerow({"step": int(step), "loss": float(loss), "mae": float(mae)})
@@ -70,6 +90,40 @@ class SimpleCSVLogger:
 
     def __exit__(self, exc_type, exc, tb):
         self.close()
+# class SimpleCSVLogger:
+#     def __init__(self, log_dir: str | Path, config: RunConfig, run_name: str = "run", extra_params: Optional[dict] = None):
+#         self.log_dir = Path(log_dir)
+#         self.log_dir.mkdir(parents=True, exist_ok=True)
+
+#         self.csv_path = self.log_dir / f"{run_name}_metrics.csv"
+#         self.json_path = self.log_dir / f"{run_name}_params.json"
+
+#         params = asdict(config)
+#         if extra_params:
+#             params.update(extra_params)
+
+#         with open(self.json_path, "w") as f:
+#             json.dump(params, f, indent=2, sort_keys=True)
+
+#         self._csv_file = open(self.csv_path, "w", newline="")
+#         self._writer = csv.DictWriter(self._csv_file, fieldnames=["step", "loss", "mae"])
+#         self._writer.writeheader()
+#         self._csv_file.flush()
+
+#     def log(self, step: int, loss: float, mae: float):
+#         self._writer.writerow({"step": int(step), "loss": float(loss), "mae": float(mae)})
+#         self._csv_file.flush()
+
+#     def close(self):
+#         if getattr(self, "_csv_file", None) is not None:
+#             self._csv_file.close()
+#             self._csv_file = None
+
+#     def __enter__(self):
+#         return self
+
+#     def __exit__(self, exc_type, exc, tb):
+#         self.close()
 
 
 # ---------- Torus distance target ----------
@@ -151,13 +205,13 @@ class FixedAttention(nn.Module):
     Implements: Attn_h(Z; V, B, C) = Z + V Z h(BZ, CZ)
     Only V is trainable.
     """
-    def __init__(self, d_model=5, attn_nonlinearity="softmax"):
+    def __init__(self, d_model=5, attn_nonlinearity="softmax", T=0.01):
         super().__init__()
         self.d_model = d_model
-        
+        self.T = T
+
         self.register_buffer('B', self._construct_B())
         self.register_buffer('C', self._construct_C())
-
         # V is trainable, initialized as identity
         # self.V = nn.Parameter(torch.eye(d_model))
         V = torch.zeros(d_model, d_model)
@@ -168,8 +222,8 @@ class FixedAttention(nn.Module):
     def _construct_B(self):
         d = self.d_model
         B = torch.zeros(d, d)
-        B[0:4, 1:5] = -1.0 / (4.0*T) *torch.eye(4) # This is only for the torus
-        B[4, 5] = -1.0 / (4.0*T) # So is this
+        B[0:4, 1:5] = -1.0 / (4.0*self.T) *torch.eye(4) # This is only for the torus
+        B[4, 5] = -1.0 / (4.0*self.T) # So is this
         return B
     
     def _construct_C(self):
@@ -225,7 +279,7 @@ class FixedTorusRegressor(nn.Module):
     Multi-layer architecture with bilinear tokenization and stacked attention layers.
     Only V matrices are trainable.
     """
-    def __init__(self, d_token=4, d_model=5, n_layers=2, attn_nonlinearity="softmax"):
+    def __init__(self, d_token=4, d_model=5, n_layers=2, attn_nonlinearity="softmax", T=0.01):
         super().__init__()
         
         # Bilinear tokenization (no parameters)
@@ -233,7 +287,17 @@ class FixedTorusRegressor(nn.Module):
         
         # Stack of attention layers, each with trainable V
         self.layers = nn.ModuleList([
-            FixedAttention(d_model=d_model, attn_nonlinearity=attn_nonlinearity)
+            FixedAttention(d_model=d_model, attn_nonlinearity=attn_nonlinearity, T=T)
+            for _ in range(n_layers)
+        ])
+        super().__init__()
+        
+        # Bilinear tokenization (no parameters)
+        self.tokenizer = BilinearTokenization(d_model=d_model)
+        
+        # Stack of attention layers, each with trainable V
+        self.layers = nn.ModuleList([
+            FixedAttention(d_model=d_model, attn_nonlinearity=attn_nonlinearity, T=T)
             for _ in range(n_layers)
         ])
         
@@ -278,7 +342,8 @@ def train_architecture(
         d_token=6, 
         d_model=config.d_model, 
         n_layers=config.n_layers,
-        attn_nonlinearity=config.attn_nonlinearity
+        attn_nonlinearity=config.attn_nonlinearity,
+        T=config.T,
     ).to(device)
     
     # Count parameters
@@ -337,21 +402,30 @@ if __name__ == "__main__":
     print("Training Multi-Layer Architecture with Trainable V Matrices")
     print("Based on Lemma A.6 construction")
     print("=" * 60)
+    ts = [0.001, 0.01, 0.05, 0.1, 0.15, 0.2, 0.25]
+    # ts = [0.15, 0.2, 0.25]
+
+    context_lengths = 2 *np.arange(1,50,2)  # [2,4,6,...,98]
+    layers = [1,3,5]  # Different number of layers to try
     
-    for thisK in [10, 25, 50, 100, 250]:
-        config = RunConfig(
-            steps=10000,
-            batch_size=64,
-            K=thisK,
-            d_model=7,
-            d_ff=0,
-            n_layers=15,  # NEW: Use 3 layers
-            lr=1e-3,
-            attn_nonlinearity="softmax",
-        )
-        
-        run_name = f"K_{thisK}_L_{config.n_layers}_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_T_{T}"
-        model = train_architecture(config, log_dir="logs/torus_trainable_v", run_name=run_name)
-        
-        print(f"\nTraining complete for K={thisK} with {config.n_layers} layers!")
-        print("-" * 60)
+    for _ in range(3):  # 3 runs per config
+        for thisLayers in layers:
+            for thisK in context_lengths:
+                for T in ts:
+                    config = RunConfig(
+                        steps=10000,
+                        batch_size=64,
+                        K=thisK,
+                        d_model=7,
+                        d_ff=0,
+                        n_layers=thisLayers,  
+                        lr=1e-3,
+                        attn_nonlinearity="softmax",
+                        T=T,
+                    )
+
+                    run_name = f"K_{thisK}_L_{config.n_layers}_T_{T}" + datetime.now().strftime("%Y%m%d_%H%M%S")
+                    model = train_architecture(config, log_dir="logs/torus_trainable_T_layers_", run_name=run_name)
+                    
+                    print(f"\nTraining complete for K={thisK} with {config.n_layers} layers!")
+                    print("-" * 60)

@@ -285,25 +285,30 @@ def train_in_context(
 # Run
 if __name__ == "__main__":
     
+    
+    
+    # Ks = [12,14,16,18,20]
+    # Ks = [2,4,6,8,10] 
     Ks = [2,4,6,8,10,12,14,16,18,20]
-    d_models = [8,16,32,64]
-    attn_nonlinearities = ["relu", "softmax", "identity", "exp"]    
-    # attn_nonlinearities = ["exp"]    
 
-    for K in Ks:
-        for d_model in d_models:
-            for attn_nonlinearity in attn_nonlinearities:
-                d_ff = d_model * 2
-                print(f"Running K={K}, d_model={d_model}, d_ff={d_ff}")
-                config = RunConfig(
-                    steps=10000,
-                    batch_size=1,
-                    K=K,
-                    d_model=d_model,
-                    d_ff=d_ff,
-                    lr=1e-3,
-                    attn_nonlinearity=attn_nonlinearity,
-                )
-                run_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        
-                model = train_in_context(config, log_dir="logs/torus_ic", run_name=run_name)
+    d_models = [8,16,32,64]
+    # attn_nonlinearities = ["relu", "softmax", "identity", "exp"]    
+    attn_nonlinearities = ["exp"]    
+    for _ in range(10):
+        for K in Ks:
+            for d_model in d_models:
+                for attn_nonlinearity in attn_nonlinearities:
+                    d_ff = d_model * 2
+                    print(f"{attn_nonlinearities}: Running K={K}, d_model={d_model}, d_ff={d_ff}")
+                    config = RunConfig(
+                        steps=10000,
+                        batch_size=32,
+                        K=K,
+                        d_model=d_model,
+                        d_ff=d_ff,
+                        lr=1e-4,
+                        attn_nonlinearity=attn_nonlinearity,
+                    )
+                    run_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            
+                    model = train_in_context(config, log_dir="logs/torus_ic", run_name=run_name)
