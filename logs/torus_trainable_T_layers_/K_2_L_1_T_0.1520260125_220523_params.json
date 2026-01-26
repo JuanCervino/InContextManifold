@@ -1,0 +1,14 @@
+{
+  "K": 2,
+  "T": 0.15,
+  "architecture": "1_layer_trainable_v",
+  "attn_nonlinearity": "softmax",
+  "batch_size": 64,
+  "d_ff": 0,
+  "d_model": 7,
+  "lr": 0.001,
+  "n_layers": 1,
+  "steps": 10000,
+  "total_params": 49,
+  "trainable_params": 49
+}
