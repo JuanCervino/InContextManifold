@@ -59,7 +59,7 @@ def load_experiments_df(log_dir="logs/torus_ic", include_history=False) -> pd.Da
 
 
 # # usage
-df = load_experiments_df("logs/torus_ic")
+df = load_experiments_df("logs/torus_trainable_VBC")
 print(df.head())
 
 from pathlib import Path

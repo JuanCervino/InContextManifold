@@ -472,15 +472,15 @@ if __name__ == "__main__":
     ts = [0.001]
     # ts = [0.15, 0.2, 0.25]
 
-    context_lengths = 2 *np.arange(10,20,2)  # [2,4,6,...,98]
-    layers = [9,15]  # Different number of layers to try
+    context_lengths = np.arange(42,50,4)  # [2,4,6,...,98]
+    layers = [1,3,5,7,9]  # Different number of layers to try
     
-    for _ in range(1):  # 3 runs per config
+    for _ in range(6):  # 3 runs per config
         for thisLayers in layers:
             for thisK in context_lengths:
                 for T in ts:
                     config = RunConfig(
-                        steps=20000,
+                        steps=10000,
                         batch_size=64,
                         K=thisK,
                         d_model=7,
@@ -492,7 +492,7 @@ if __name__ == "__main__":
                     )
 
                     run_name = f"K_{thisK}_L_{config.n_layers}_T_{T}" + datetime.now().strftime("%Y%m%d_%H%M%S")
-                    model = train_architecture(config, log_dir="logs/torus_trainable_T_layers_", run_name=run_name)
+                    model = train_architecture(config, log_dir="logs/torus_trainable_VBC", run_name=run_name)
                     
                     print(f"\nTraining complete for K={thisK} with {config.n_layers} layers!")
                     print("-" * 60)
