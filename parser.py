@@ -119,7 +119,7 @@ def load_experiments_df(log_dir="logs/torus_trainable_T_layers_", include_histor
 
 
 # # usage
-df = load_experiments_df("logs/torus_trainable_T_layers_")
+df = load_experiments_df("logs/torus_trainable_VBC")
 print(df.head())
 
 from pathlib import Path
