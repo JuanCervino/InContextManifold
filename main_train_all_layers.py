@@ -10,6 +10,7 @@ from typing import Optional
 from datetime import datetime
 import numpy as np
 
+
 TWOPI = 2.0 * math.pi
 
 # -------------------------
@@ -26,6 +27,7 @@ class RunConfig:
     lr: float = 0.001  # Now with training
     attn_nonlinearity: str = "softmax"
     T: float = 0.01
+    bias: bool = False
 
     @staticmethod
     def from_json(path: str | Path) -> "RunConfig":
@@ -166,13 +168,13 @@ class Attention(nn.Module):
     Implements: Attn_h(Z; V, B, C) = Z + V Z h(BZ, CZ)
     Only V is trainable.
     """
-    def __init__(self, d_model=5, attn_nonlinearity="softmax"):
+    def __init__(self, d_model=5, attn_nonlinearity="softmax", bias=False):
         super().__init__()
         self.d_model = d_model
 
-        self.B = nn.Linear(d_model, d_model)
-        self.C = nn.Linear(d_model, d_model)
-        self.V = nn.Linear(d_model, d_model)
+        self.B = nn.Linear(d_model, d_model, bias=bias)
+        self.C = nn.Linear(d_model, d_model, bias=bias)
+        self.V = nn.Linear(d_model, d_model, bias=bias)
         # V is trainable, initialized as identity
         # self.V = nn.Parameter(torch.eye(d_model))
         self.attn_nonlinearity = attn_nonlinearity 
@@ -190,6 +192,10 @@ class Attention(nn.Module):
             attn = attn / (attn.sum(dim=-2, keepdim=True) + 1e-8)
         elif name == "identity":
             attn = scores
+        elif name == "silu":
+            attn = F.silu(scores)
+        elif name == "gelu":
+            attn = F.gelu(scores)
         else:
             raise ValueError(f"Unknown attn_nonlinearity: {name}")
 
@@ -218,9 +224,10 @@ class BilinearTokenization(nn.Module):
     Implements the bilinear tokenization scheme from Lemma A.6.
     bilin(Z) = [1, x1, x2, ||x1||^2, ||x2||^2, 0, ..., 0, y]^T
     """
-    def __init__(self, d_model=5):
+    def __init__(self, d_model=5, torus_dim =2):
         super().__init__()
         self.d_model = d_model
+        self.torus_dim = torus_dim
         self.n_padding = max(0, d_model - 5)
         
     def forward(self, tokens):
@@ -252,66 +259,13 @@ class BilinearTokenization(nn.Module):
         return embedded
 
 
-class FixedAttention(nn.Module):
-    """
-    Fixed attention mechanism with specific weight matrices from Lemma A.6.
-    Implements: Attn_h(Z; V, B, C) = Z + V Z h(BZ, CZ)
-    Only V is trainable.
-    """
-    def __init__(self, d_model=5, attn_nonlinearity="softmax", T=0.01):
-        super().__init__()
-        self.d_model = d_model
-        self.T = T
 
-        self.register_buffer('B', self._construct_B())
-        self.register_buffer('C', self._construct_C())
-        # V is trainable, initialized as identity
-        # self.V = nn.Parameter(torch.eye(d_model))
-        V = torch.zeros(d_model, d_model)
-        V[-1, -1] = torch.randn(1).item() * 0.01  # Small random initialization
-        self.V = nn.Parameter(V)
-        self.attn_nonlinearity = attn_nonlinearity 
-    
-    def _apply_attn_nonlinearity(self, scores):
-        name = self.attn_nonlinearity.lower()
-        if name == "softmax":
-            attn = F.softmax(scores, dim=-1)
-        elif name == "exp":
-            attn = torch.exp(scores)
-            attn = attn / (attn.sum(dim=-2, keepdim=True) + 1e-8)
-        elif name == "relu":
-            attn = F.relu(scores)
-            attn = attn / (attn.sum(dim=-2, keepdim=True) + 1e-8)
-        elif name == "identity":
-            attn = scores
-        else:
-            raise ValueError(f"Unknown attn_nonlinearity: {name}")
-        return attn
-    
-    def forward(self, x, mask=None):
-        """
-        x: (B, L, d_model)
-        Computes: Z + V Z h(BZ, CZ) where h is the attention nonlinearity
-        """
-        B, L, D = x.shape
-        
-        BZ = x @ self.B.T
-        CZ = x @ self.C.T
-        
-        scores = torch.bmm(BZ, CZ.transpose(-2, -1))
-        
-
-        attn = self._apply_attn_nonlinearity(scores)
-        VZ = x @ self.V.T
-        out = torch.bmm(attn, VZ) 
-        
-        return x + out ## This seems like the residual stream
 class TorusRegressor(nn.Module):
     """
     Multi-layer architecture with bilinear tokenization and stacked attention layers.
     All matrices trainable
     """
-    def __init__(self, d_token=4, d_model=5, n_layers=2, attn_nonlinearity="softmax", T=0.01):
+    def __init__(self, d_token=4, d_model=5, n_layers=2, attn_nonlinearity="softmax"):
 
         super().__init__()
         
@@ -349,51 +303,6 @@ class TorusRegressor(nn.Module):
         
         return yhat
 
-
-class FixedTorusRegressor(nn.Module):
-    """
-    Multi-layer architecture with bilinear tokenization and stacked attention layers.
-    Only V matrices are trainable.
-    """
-    def __init__(self, d_token=4, d_model=5, n_layers=2, attn_nonlinearity="softmax", T=0.01):
-
-        super().__init__()
-        
-        # Bilinear tokenization (no parameters)
-        self.tokenizer = BilinearTokenization(d_model=d_model)
-        
-        # Stack of attention layers, each with trainable V
-        self.layers = nn.ModuleList([
-            FixedAttention(d_model=d_model, attn_nonlinearity=attn_nonlinearity, T=T)
-            for _ in range(n_layers)
-        ])
-        
-        # Fixed output projection
-        self.register_buffer('out_proj', self._construct_output_projection(d_model))
-        
-    def _construct_output_projection(self, d_model):
-        proj = torch.zeros(1, d_model)
-        proj[0, -1] = 1.0  # Extract from last dimension (y values)
-        return proj
-        
-    def forward(self, tokens, attn_mask=None):
-        """
-        tokens: (B, L, 4) = [x1, x2, y_or_0, is_query]
-        returns: yhat_all: (B, L)
-        """
-        # Tokenize once using bilinear scheme
-        h = self.tokenizer(tokens)
-        
-        # Apply multiple attention layers
-        for layer in self.layers:
-            h = layer(h, mask=attn_mask)
-        
-        # Project to output
-        yhat = (h @ self.out_proj.T).squeeze(-1)
-        
-        return yhat
-
-
 def train_architecture(
     config: RunConfig,
     log_dir: str | Path = "logs/torus_trainable_v",
@@ -410,7 +319,6 @@ def train_architecture(
         d_model=config.d_model, 
         n_layers=config.n_layers,
         attn_nonlinearity=config.attn_nonlinearity,
-        T=config.T,
     ).to(device)
     
     # Count parameters
@@ -418,7 +326,7 @@ def train_architecture(
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     
     print(f"Total params: {total_params}, Trainable: {trainable_params}")
-    print(f"Architecture: {config.n_layers}-layer with trainable V matrices")
+    print(f"Architecture: {config.n_layers}-layer with activation {config.attn_nonlinearity}")
     
     # Setup optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
@@ -430,7 +338,8 @@ def train_architecture(
         extra_params={
             "total_params": total_params, 
             "trainable_params": trainable_params,
-            "architecture": f"{config.n_layers}_layer_trainable_v"
+            "architecture": f"{config.n_layers}_layer_trainable_v",
+            "Activation": f"{config.attn_nonlinearity} attention"
         },
     )
 
@@ -466,20 +375,19 @@ def train_architecture(
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Training Multi-Layer Architecture with Trainable V Matrices")
-    print("Based on Lemma A.6 construction")
+    print("Training Multi-Layer Architecture with different attentions")
     print("=" * 60)
-    ts = [0.001]
-    # ts = [0.15, 0.2, 0.25]
 
-    context_lengths = np.arange(42,50,4)  # [2,4,6,...,98]
+    output_dir = "/home/theniche/Research/InContextLearning/InContextManifold/save_models"
+
+    context_lengths = np.arange(2,50,4)[-1:]
     layers = [1,3,5,7,9]  # Different number of layers to try
-    
-    for _ in range(6):  # 3 runs per config
-        for thisLayers in layers:
-            for thisK in context_lengths:
-                for T in ts:
-                    config = RunConfig(
+    bias = False  # Whether to include bias in attention layers
+  
+    for thisLayers in layers:
+        for thisK in context_lengths:
+            for activation in ['softmax']:
+                config = RunConfig(
                         steps=10000,
                         batch_size=64,
                         K=thisK,
@@ -487,12 +395,12 @@ if __name__ == "__main__":
                         d_ff=0,
                         n_layers=thisLayers,  
                         lr=1e-3,
-                        attn_nonlinearity="softmax",
-                        T=T,
+                        attn_nonlinearity=activation,
+                        bias= bias
                     )
 
-                    run_name = f"K_{thisK}_L_{config.n_layers}_T_{T}" + datetime.now().strftime("%Y%m%d_%H%M%S")
-                    model = train_architecture(config, log_dir="logs/torus_trainable_VBC", run_name=run_name)
-                    
-                    print(f"\nTraining complete for K={thisK} with {config.n_layers} layers!")
-                    print("-" * 60)
+                run_name = f"K_{thisK}_L_{config.n_layers}_" + datetime.now().strftime("%Y%m%d_%H%M%S") + f'_activation_{activation}' + f'_bias_{bias}'
+                model = train_architecture(config, log_dir=output_dir + '/logs/', run_name=run_name)
+                torch.save(model.state_dict(), Path(output_dir) / f"{run_name}_model.pt")
+                print(f"\nTraining complete for K={thisK} with {config.n_layers} layers!")
+                print("-" * 60)
