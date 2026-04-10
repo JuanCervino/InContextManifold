@@ -48,7 +48,7 @@ def heat_kernel_torus_2d(t, x_vec, y_vec, wrap=True):
 
 # --- Gram matrix builders ---
 
-def gram_matrix_heat_torus_2d(X, t, wrap=True):
+def gram_matrix_heat_torus_2d(X, t, wrap=True, noise=None): ## Added noise argument for consistency, but not used in this kernel
     """Gram matrix K[i,j] = heat_kernel_torus_2d(t, X[i], X[j])."""
     X = np.asarray(X, dtype=float)
     n = X.shape[0]
@@ -61,10 +61,13 @@ def gram_matrix_heat_torus_2d(X, t, wrap=True):
     return K
 
 
-def _embed_torus(X):
+def _embed_torus(X, noise=0.0):
     """Map angles to R^4 embedding: (cos θ1, sin θ1, cos θ2, sin θ2)."""
-    return np.column_stack([np.cos(X[..., 0]), np.sin(X[..., 0]),
-                            np.cos(X[..., 1]), np.sin(X[..., 1])])
+    embedded = np.column_stack([np.cos(X[..., 0]), np.sin(X[..., 0]),
+                                np.cos(X[..., 1]), np.sin(X[..., 1])])
+    if noise > 0.0:
+        embedded += np.random.normal(scale=noise, size=embedded.shape)
+    return embedded
 
 
 def _sq_dist_matrix(A, B=None):
@@ -74,21 +77,21 @@ def _sq_dist_matrix(A, B=None):
     return cdist(A, B, metric='sqeuclidean')
 
 
-def gram_softmax(X, t=0.5, wrap=True):
-    real_X = _embed_torus(X)
+def gram_softmax(X, t=0.5, wrap=True, noise=0.0):
+    real_X = _embed_torus(X, noise=noise)
     dist_mat = _sq_dist_matrix(real_X)
     exp_x = np.exp(-dist_mat / (4 * t))
     return exp_x / np.sum(exp_x, axis=1)[:, np.newaxis]
 
 
-def gram_exp(X, t=0.5, wrap=True):
-    real_X = _embed_torus(X)
+def gram_exp(X, t=0.5, wrap=True, noise=0.0):
+    real_X = _embed_torus(X, noise=noise)
     dist_mat = _sq_dist_matrix(real_X)
     return np.exp(-dist_mat / (4 * t))
 
 
-def gram_euclidean_heat(X, t=0.5, wrap=True):
-    real_X = _embed_torus(X)
+def gram_euclidean_heat(X, t=0.5, wrap=True, noise=0.0):
+    real_X = _embed_torus(X, noise=noise)
     dist_mat = _sq_dist_matrix(real_X)
     return np.exp(-dist_mat / (4 * t)) / (4 * np.pi * t) ** (real_X.shape[1] / 2)
 
@@ -177,8 +180,8 @@ class KernelModel:
     gram_fn: Callable       # (X, t, wrap) -> K
     kv_fn: Callable          # (x_test, X_train, t, wrap) -> vector
 
-    def fit(self, X, y, t, lam, wrap=True):
-        K = self.gram_fn(X, t=t, wrap=wrap)
+    def fit(self, X, y, t, lam, wrap=True, noise=0.0):
+        K = self.gram_fn(X, t=t, wrap=wrap, noise=noise)
         alpha = solve_alphas(K, y, lam=lam)
         return K, alpha
 
@@ -189,7 +192,7 @@ class KernelModel:
 MODELS = {
     'softmax': KernelModel('softmax', gram_softmax, kernel_vector_softmax),
     'heat': KernelModel('heat', gram_matrix_heat_torus_2d, kernel_vector_heat),
-    'euclidean_heat': KernelModel('euclidean_heat', gram_euclidean_heat, kernel_vector_euclidean_heat),
+    #'euclidean_heat': KernelModel('euclidean_heat', gram_euclidean_heat, kernel_vector_euclidean_heat),
 }
 
 
@@ -224,118 +227,118 @@ run_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 out_dir = Path(__file__).parent / "kernels"
 out_dir.mkdir(parents=True, exist_ok=True)
 
-csv_path = out_dir / f"errors_by_model_{run_time}_{task}.csv"
-episode_csv_path = out_dir / f"episode_params_{run_time}_{task}.csv"
-plot_path = out_dir / f"kernel_machine_heat_torus_kernels_{run_time}_{task}.png"
 
-print(f"Writing results to {csv_path}")
+print(f"Writing results to {out_dir} with timestamp {run_time} for task '{task}'")
 
 # --- Hyperparameters ---
 batch_size = 1
-num_episodes = 20
+num_episodes = 10
 context_lengths = 2 * np.arange(1, 40, 2)
-
 lams = np.logspace(-10, 3, 8).tolist()
+noise_levels = [0.0, 0.01, 0.05, 0.1]  # Add noise levels here if desired
 
 # --- Accumulators ---
 rows = []
 episode_rows = []
 means_for_models = {name: [] for name in MODELS}
 stds_for_models = {name: [] for name in MODELS}
+for noise in noise_levels:
+    csv_path = out_dir / f"errors_by_model_{run_time}_{task}_noise_{noise}.csv"
+    episode_csv_path = out_dir / f"episode_params_{run_time}_{task}_noise_{noise}.csv"
+    plot_path = out_dir / f"kernel_machine_heat_torus_kernels_{run_time}_{task}_noise_{noise}.png"
+    for K_context in context_lengths:
+        tracker = BestConfigTracker()
+        errors_by_model = {name: np.zeros(num_episodes) for name in MODELS}
+        episode_params = {name: [] for name in MODELS}
 
-for K_context in context_lengths:
-    tracker = BestConfigTracker()
-    errors_by_model = {name: np.zeros(num_episodes) for name in MODELS}
-    episode_params = {name: [] for name in MODELS}
+        for rep in range(num_episodes):
+            min_error = {name: 100.0 for name in MODELS}
+            best_t = {name: None for name in MODELS}
+            best_lam = {name: None for name in MODELS}
 
-    for rep in range(num_episodes):
-        min_error = {name: 100.0 for name in MODELS}
-        best_t = {name: None for name in MODELS}
-        best_lam = {name: None for name in MODELS}
+            tokens, y_q = sample_episode(batch_size, K_context, p, device, task=task)
 
-        tokens, y_q = sample_episode(batch_size, K_context, p, device, task=task)
+            # Extract numpy arrays once per episode (not inside the triple loop)
+            tok_np = tokens.cpu().numpy()[0]
+            X = tok_np[:K_context, :2]
+            y = tok_np[:K_context, 2]
+            X_test = tok_np[-1:, :2]
+            y_q_np = y_q.cpu().numpy().item()
+            ts = [c * 4 * np.pi**2 / K_context for c in [0.1, 0.25, 0.5, 1.0, 2.0]]
+            for t_tilde in ts:
+                for lam_tilde in lams:
+                    for name, model in MODELS.items():
+                        try:
+                            K, alpha = model.fit(X, y, t=t_tilde, lam=lam_tilde, noise=noise)
+                            y_pred = model.predict(X, alpha, X_test, t=t_tilde)
+                            error = np.abs(y_pred[0] - y_q_np)
 
-        # Extract numpy arrays once per episode (not inside the triple loop)
-        tok_np = tokens.cpu().numpy()[0]
-        X = tok_np[:K_context, :2]
-        y = tok_np[:K_context, 2]
-        X_test = tok_np[-1:, :2]
-        y_q_np = y_q.cpu().numpy().item()
-        ts = [c * 4 * np.pi**2 / K_context for c in [0.1, 0.25, 0.5, 1.0, 2.0]]
-        for t_tilde in ts:
-            for lam_tilde in lams:
-                for name, model in MODELS.items():
-                    try:
-                        K, alpha = model.fit(X, y, t=t_tilde, lam=lam_tilde)
-                        y_pred = model.predict(X, alpha, X_test, t=t_tilde)
-                        error = np.abs(y_pred[0] - y_q_np)
+                            if error < min_error[name]:
+                                min_error[name] = error
+                                best_t[name] = t_tilde
+                                best_lam[name] = lam_tilde
+                                tracker.update(name, error, t_tilde, lam_tilde, K_context)
 
-                        if error < min_error[name]:
-                            min_error[name] = error
-                            best_t[name] = t_tilde
-                            best_lam[name] = lam_tilde
-                            tracker.update(name, error, t_tilde, lam_tilde, K_context)
+                        except np.linalg.LinAlgError:
+                            pass
 
-                    except np.linalg.LinAlgError:
-                        pass
+            for name in MODELS:
+                errors_by_model[name][rep] = min_error[name]
+                episode_params[name].append({
+                    'episode': rep, 'K_context': int(K_context),
+                    'error': min_error[name],
+                    't': best_t[name], 'lam': best_lam[name]
+                })
 
         for name in MODELS:
-            errors_by_model[name][rep] = min_error[name]
-            episode_params[name].append({
-                'episode': rep, 'K_context': int(K_context),
-                'error': min_error[name],
-                't': best_t[name], 'lam': best_lam[name]
+            mean_err = np.mean(errors_by_model[name])
+            std_err = np.std(errors_by_model[name])
+            means_for_models[name].append(mean_err)
+            stds_for_models[name].append(std_err)
+
+            best_cfg = tracker.get_best(name)
+            rows.append({
+                "model": name, "K_context": int(K_context),
+                "mean_error": mean_err, "std_error": std_err,
+                "best_t": best_cfg.get("t"), "best_lam": best_cfg.get("lam"),
+                "best_score": best_cfg.get("score"),
             })
+            for ep in episode_params[name]:
+                episode_rows.append({"model": name, **ep})
 
+            print(f"{name:>16s}  K={K_context:3.0f}  "
+                f"err={mean_err:.4f}±{std_err:.4f}  "
+                f"t*={best_cfg.get('t')}  λ*={best_cfg.get('lam')}")
+
+    # --- Write CSVs ---
+    if rows:
+        with csv_path.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            w.writerows(rows)
+
+    if episode_rows:
+        with episode_csv_path.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(episode_rows[0].keys()))
+            w.writeheader()
+            w.writerows(episode_rows)
+        print(f"Per-episode parameters saved to {episode_csv_path}")
+
+    # --- Plot ---
+    fig, ax = plt.subplots(figsize=(12, 6))
     for name in MODELS:
-        mean_err = np.mean(errors_by_model[name])
-        std_err = np.std(errors_by_model[name])
-        means_for_models[name].append(mean_err)
-        stds_for_models[name].append(std_err)
+        means = np.array(means_for_models[name])
+        stds = np.array(stds_for_models[name])
+        ax.errorbar(context_lengths, means, yerr=stds, fmt='-o', label=name.capitalize())
 
-        best_cfg = tracker.get_best(name)
-        rows.append({
-            "model": name, "K_context": int(K_context),
-            "mean_error": mean_err, "std_error": std_err,
-            "best_t": best_cfg.get("t"), "best_lam": best_cfg.get("lam"),
-            "best_score": best_cfg.get("score"),
-        })
-        for ep in episode_params[name]:
-            episode_rows.append({"model": name, **ep})
-
-        print(f"{name:>16s}  K={K_context:3.0f}  "
-              f"err={mean_err:.4f}±{std_err:.4f}  "
-              f"t*={best_cfg.get('t')}  λ*={best_cfg.get('lam')}")
-
-# --- Write CSVs ---
-if rows:
-    with csv_path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        w.writeheader()
-        w.writerows(rows)
-
-if episode_rows:
-    with episode_csv_path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(episode_rows[0].keys()))
-        w.writeheader()
-        w.writerows(episode_rows)
-    print(f"Per-episode parameters saved to {episode_csv_path}")
-
-# --- Plot ---
-fig, ax = plt.subplots(figsize=(12, 6))
-for name in MODELS:
-    means = np.array(means_for_models[name])
-    stds = np.array(stds_for_models[name])
-    ax.errorbar(context_lengths, means, yerr=stds, fmt='-o', label=name.capitalize())
-
-ax.set_xlabel('K_context')
-ax.set_ylabel('Mean Absolute Error ± StdDev')
-ax.set_yscale('log')
-ax.set_title('Different Kernel Machines on Heat Kernel over 2D Torus')
-ax.set_xticks(context_lengths)
-ax.tick_params(axis='x', rotation=45)
-ax.grid(True)
-ax.legend()
-fig.tight_layout()
-fig.savefig(plot_path)
-print(f"Plot saved to {plot_path}")
+    ax.set_xlabel('K_context')
+    ax.set_ylabel('Mean Absolute Error ± StdDev')
+    ax.set_yscale('log')
+    ax.set_title('Different Kernel Machines on Heat Kernel over 2D Torus')
+    ax.set_xticks(context_lengths)
+    ax.tick_params(axis='x', rotation=45)
+    ax.grid(True)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(plot_path)
+    print(f"Plot saved to {plot_path}")

@@ -90,10 +90,11 @@ def torus_distance(xy, pxy, period=TWOPI, eps=1e-12):
     dx = torus_delta(xy[..., 0], pxy[..., 0], period)
     dy = torus_delta(xy[..., 1], pxy[..., 1], period)
     return torch.sqrt(dx*dx + dy*dy + eps)
-
+def periodic_func(xy, pxy):
+    return torch.cos(xy[..., 0]) * torch.sin(xy[..., 1])**2
 # ---------- Episode sampler ----------
 @torch.no_grad()
-def sample_episode(batch_size, K, p, device, func=torus_distance):
+def sample_episode(batch_size, K, p, device, noise=0.0, task='periodic'):
     """
     Returns:
       tokens: (B, K+1, 4) where each token is [x1, x2, y, is_query]
@@ -103,7 +104,10 @@ def sample_episode(batch_size, K, p, device, func=torus_distance):
     """
     # context
     x_ctx = torch.rand(batch_size, K, 2, device=device) * TWOPI
-    y_ctx = func(x_ctx, p).unsqueeze(-1)  # (B,K,1)
+    if task == 'periodic':
+        y_ctx = periodic_func(x_ctx, p).unsqueeze(-1)  # (B,K,1)
+    else:
+        y_ctx = torus_distance(x_ctx, p).unsqueeze(-1)  # (B,K,1)
 
     is_query_ctx = torch.zeros(batch_size, K, 1, device=device)
 
@@ -111,7 +115,10 @@ def sample_episode(batch_size, K, p, device, func=torus_distance):
 
     # query
     x_q = torch.rand(batch_size, 1, 2, device=device) * TWOPI
-    y_q = func(x_q, p).squeeze(-1).squeeze(-1)          # (B,)
+    if task == 'periodic':
+        y_q = periodic_func(x_q, p).squeeze(-1).squeeze(-1)          # (B,)
+    else:
+        y_q = torus_distance(x_q, p).squeeze(-1).squeeze(-1)          # (B,)
     y_q_hidden = torch.zeros(batch_size, 1, 1, device=device)
     is_query_q = torch.ones(batch_size, 1, 1, device=device)
 
